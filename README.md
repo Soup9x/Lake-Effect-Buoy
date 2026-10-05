@@ -15,7 +15,7 @@ A multi-tenant management console for ClamAV, built for an MSP managing ClamAV a
 
 ## Security model
 
-The permanent project rules are in [CLAUDE.md](CLAUDE.md). In short: the agent only runs a fixed allowlist of actions (none are enabled in Phase 1); every admin action is audited in an append-only log enforced by the database; the UI requires authentication and is designed for MFA; secrets only come from environment variables; agent releases are signed with an offline key; agents only stop on an explicit `agent_revoked` response.
+The permanent project rules are in [CLAUDE.md](CLAUDE.md). In short: the agent only runs a fixed allowlist of ClamAV actions (check, reload, stats, and scans of folders allowed on the endpoint itself); every admin action is audited in an append-only log enforced by the database; the UI requires authentication and is designed for MFA; secrets only come from environment variables; agent releases are signed with an offline key; agents only stop on an explicit `agent_revoked` response.
 
 ## Layout
 
