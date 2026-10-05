@@ -119,12 +119,24 @@ If the key leaked, also consider rotating every agent credential from the UI (ea
 
 ## Publish an agent release
 
-Agent binaries and install scripts are signed offline with the release minisign key, which never touches this server (see `docs/release-signing.md`). On the release workstation:
+Agent binaries and install scripts are signed offline with the release minisign key, which never touches this server (see `docs/release-signing.md`). `scripts/release.sh` builds and signs a release in one command. It uses Go if installed, otherwise Docker (`golang:1.26-alpine`).
+
+**Test VM: one command on the console server.** This signs with a throwaway TEST key and publishes straight to this console:
 
 ```sh
-make dist      # builds dist/downloads/*
-make sign      # signs every file with the offline key -> *.minisig
+cd /path/to/Lake-Effect-Buoy && git pull
+sudo scripts/release.sh --test
 ```
+
+The TEST key is created on first use in `../buoy-test-release-key` (next to the checkout, never inside it), with a random password beside it, and is reused by later runs. Agents and install scripts from a test release trust only that key, so use it for test machines only. After publishing, create a new enrollment token for new endpoints; installed Linux endpoints upgrade by running their install command again (no token needed).
+
+**Real release: on the offline release workstation.**
+
+```sh
+scripts/release.sh --key /media/usb/minisign.key --version 1.0.0
+```
+
+It asks for the key password (or reads `MINISIGN_PASSWORD`) and refuses to run in a checkout that has `deploy/.env`, so the real key cannot end up on the console. It is the same as `make dist VERSION=1.0.0` followed by `MINISIGN_SECRET_KEY=/media/usb/minisign.key make sign`.
 
 Copy the contents of `dist/downloads/` (files and their `.minisig`) into the server's downloads directory (`CAV_DOWNLOADS_PATH`, default `deploy/downloads`). The server serves them read-only at `/downloads/<name>`. No restart is needed. The install scripts refuse anything whose signature doesn't verify against the public key embedded in them.
 

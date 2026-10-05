@@ -61,6 +61,8 @@ RELEASE_PUBKEY_FILE=/tmp/test.pub scripts/build-dist.sh
 RELEASE_PUBKEY_FILE=/tmp/test.pub MINISIGN_SECRET_KEY=/tmp/test.key scripts/sign-dist.sh
 ```
 
+`scripts/release.sh --test` does all of this in one step for a test VM: it keeps the throwaway key outside the checkout, builds, signs and publishes to the local console (docs/operations.md).
+
 ## Windows: interim verifier, Authenticode later
 
 Windows has no built-in Ed25519 or BLAKE2b, so `install.ps1` currently verifies minisign signatures with an inline C# implementation (tested against Wycheproof and BLAKE2b reference vectors in CI, see `packaging/windows/tests/`). This is interim. Once we have a code-signing certificate, the release process will Authenticode-sign `clamav-agent_windows_amd64.exe` (and the PowerShell scripts), `install.ps1` will check `Get-AuthenticodeSignature` for a `Valid` status and the expected signer thumbprint, and the inline verifier will be removed. Linux keeps minisign.
