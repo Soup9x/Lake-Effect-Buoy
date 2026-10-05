@@ -48,7 +48,7 @@ type Config struct {
 	// --scan-roots, or clamav-agent set-scan-roots); the server cannot change
 	// it. Empty means scans are refused.
 	ScanRoots []string `yaml:"scan_roots,omitempty"`
-	LogLevel   string `yaml:"log_level,omitempty"`
+	LogLevel  string   `yaml:"log_level,omitempty"`
 	// InsecureHTTPForTesting allows an http:// server URL. Never use it in
 	// production; the agent logs a loud warning whenever it is set.
 	InsecureHTTPForTesting bool `yaml:"insecure_http_for_testing,omitempty"`
