@@ -37,3 +37,17 @@
   <label for="notes">Notes</label>
   <textarea id="notes" name="notes" rows="3" maxlength="4000">{{.Notes}}</textarea>
 {{end}}
+
+{{define "action_fields"}}
+  <label>Action
+    <select name="type" required>
+      {{range .}}<option value="{{.Type}}">{{.Label}}</option>{{end}}
+    </select>
+  </label>
+  <label>Folder to scan <span class="small">(Scan a folder only)</span><input type="text" name="path" maxlength="1024" placeholder="/srv/www"></label>
+{{end}}
+
+{{define "action_help"}}
+<p class="small muted">Actions run when the endpoint next checks in (within about a minute while it is online). Only this fixed list of ClamAV actions exists; the endpoint cannot be told to run anything else.
+A folder can be scanned only if it is inside a scan folder set on the endpoint itself (<code>clamav-agent set-scan-roots</code> or the installer's <code>--scan-roots</code>); until one is set, scans are refused. Reload and stats need <code>EnableReloadCommand</code> / <code>EnableStatsCommand</code> in clamd.conf (the Linux installer turns them on).</p>
+{{end}}

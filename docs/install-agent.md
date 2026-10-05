@@ -18,7 +18,7 @@ In the console, open the client's tenant, go to *Enrollment tokens* and create a
 - **Linux:** paste it into a terminal on the endpoint. It uses `sudo` (drop `sudo` if you are already root).
 - **Windows:** paste it into PowerShell opened with *Run as administrator*.
 
-That is all: the command downloads the installer, which verifies the agent's release signature, installs it as a service, enrolls the machine and starts it. Within about a minute the endpoint shows as online. The token is passed to the installer on stdin (Linux) or in the PowerShell session's environment (Windows), never as a command-line argument. The Linux command starts with a space so that bash's `ignorespace` (Ubuntu's default) keeps it out of the shell history.
+That is all: the command downloads the installer, which verifies the agent's release signature, installs it as a service, enrolls the machine and starts it. On Debian/Ubuntu it also installs and sets up ClamAV if needed (see [ClamAV setup](#clamav-setup-linux)). It ends with **ALL SET** or with an **ACTION NEEDED** line saying exactly what is left. Within about a minute the endpoint shows as online. The token is passed to the installer on stdin (Linux) or in the PowerShell session's environment (Windows), never as a command-line argument. The Linux command starts with a space so that bash's `ignorespace` (Ubuntu's default) keeps it out of the shell history.
 
 If the console uses a private CA (for example a test VM reached by IP address, see [Console with a private CA](#console-with-a-private-ca)), the commands also carry the CA's fingerprint and need nothing installed beforehand.
 
@@ -28,7 +28,7 @@ The sections below describe the installers' options, for running them from an RM
 
 - The console URL, e.g. `https://console.example.com` (must be https).
 - An enrollment token for the client's tenant (`cav_enr_...`), created in the console under *Tenant → Enrollment tokens*. It is shown once.
-- ClamAV with clamd installed and running. (The agent still installs without it and reports `not_installed` / `not_responding`.)
+- ClamAV with clamd. On Debian/Ubuntu the Linux installer sets it up for you; elsewhere, install and start clamd first. (The agent still installs without it and reports `not_installed` / `not_responding`.)
 
 ## Linux
 
@@ -47,6 +47,8 @@ Options (each can also be given as an environment variable, which suits RMM tool
 | `--token-stdin` | `CAV_ENROLL_TOKEN` | to enroll | Enrollment token, read from stdin with `--token-stdin`. Passed to the agent via the environment, never on a command line |
 | `--ca-sha256 HEX` | `CAV_CA_SHA256` | private CA only | SHA-256 fingerprint of the console's CA certificate (see below) |
 | `--clamd ADDR` | `CAV_CLAMD_ADDR` | no | `unix:///path/to/clamd.sock` or `tcp://127.0.0.1:3310`. Default: first existing of `/run/clamav/clamd.ctl` (Debian/Ubuntu), `/run/clamd.scan/clamd.sock` (RHEL), `/var/run/clamav/clamd.ctl` |
+| `--no-clamav-setup` | `CAV_CLAMAV_SETUP=0` | no | Leave ClamAV alone (see [ClamAV setup](#clamav-setup-linux)). Implied by `--clamd` |
+| `--scan-roots LIST` | `CAV_SCAN_ROOTS` | no | Folders the console may scan, comma-separated, e.g. `/srv,/var/www`. An empty list turns scans off. Default: keep the current list (none on a new install). See [Actions from the console](#actions-from-the-console) |
 | `--reinstall` | | no | Enroll again with a new token |
 
 What `install.sh` does:
@@ -54,10 +56,23 @@ What `install.sh` does:
 1. With `--ca-sha256`: downloads the console's CA certificate and continues only if its fingerprint matches. Otherwise reuses a CA installed by an earlier run, if any.
 2. Downloads `clamav-agent_linux_<arch>`, `clamav-agent.service` and their `.minisig` files from `$CAV_SERVER_URL/downloads/`.
 3. **Verifies the minisign signatures** with the release public key embedded in the script (see below). Nothing is installed if verification fails.
-4. Creates the system user `clamav-agent` (no login shell) and adds it to the group that owns the clamd socket.
+4. Creates the system user `clamav-agent` (no login shell), sets up ClamAV (below), and adds the agent user to the group that owns the clamd socket.
 5. Installs the binary (and the CA at `/etc/clamav-agent/console-ca.pem`), runs `clamav-agent enroll`, sets ownership/permissions, installs and starts the hardened systemd unit.
 
+6. Waits (a few minutes at most) until the agent gets an answer from clamd, then prints **ALL SET**, or **ACTION NEEDED** with the exact fix.
+
 It is idempotent: running it again upgrades the binary and unit and keeps the existing enrollment (no token needed). `sh install.sh --reinstall` enrolls again with a new token and asks the console to replace this machine's previous agent.
+
+### ClamAV setup (Linux)
+
+Unless you pass `--no-clamav-setup` (or `--clamd`, which means you manage clamd yourself), the installer makes sure ClamAV works on Debian/Ubuntu:
+
+1. Installs `clamav-daemon` and `clamav-freshclam` with `apt-get` if clamd is missing (waiting up to 5 minutes for another apt run, such as unattended upgrades, to finish).
+2. Enables `clamav-freshclam` and waits for it to download the virus databases. Ubuntu's `clamav-daemon` does not start without them.
+3. Turns on clamd's `VERSION`, `RELOAD` and `STATS` commands where `/etc/clamav/clamd.conf` lists them as off (ClamAV 1.5 packages ship them off; the agent needs `VERSION` to report signature versions, freshclam and the console's "Reload signatures" action use `RELOAD`, and the "clamd stats" action uses `STATS`). The original file is kept as `clamd.conf.cav-orig`. Options the file does not list are left alone, because older clamd refuses unknown options.
+4. Enables and starts `clamav-daemon`.
+
+On other distributions it installs nothing and prints what to do (RHEL/Rocky/Alma: `dnf install clamd clamav-update` from EPEL); install and start clamd, then run the installer again (no token needed).
 
 Uninstall: `sh uninstall.sh` (or `--keep-data` to keep config and credential). Then revoke the endpoint in the console.
 
@@ -120,6 +135,30 @@ sh install.sh --verify-only clamav-agent_linux_amd64 clamav-agent_linux_amd64.mi
 .\install.ps1 -VerifyOnly -VerifyFile .\clamav-agent_windows_amd64.exe -VerifySignatureFile .\clamav-agent_windows_amd64.exe.minisig
 ```
 
+## Actions from the console
+
+The console can ask an endpoint to run one of a fixed list of ClamAV actions, on one endpoint (the endpoint's page) or on many at once (a tenant's **Run action…** button). Nothing else can be run: the agent has no way to execute commands, scripts or programs sent by the console (CLAUDE.md rule 1).
+
+| Action | What the endpoint does | Needs in `clamd.conf` |
+|---|---|---|
+| Check clamd | Asks clamd for its version and signature database version | `EnableVersionCommand yes` |
+| Reload signatures | Tells clamd to reload its signature databases (`RELOAD`) | `EnableReloadCommand yes` |
+| clamd stats | Returns clamd's thread pool and queue statistics (`STATS`) | `EnableStatsCommand yes` |
+| Scan a folder | clamd scans the folder (`CONTSCAN`) and reports infected files and files it could not read. Nothing is quarantined or deleted | a scan folder set on the endpoint (below) |
+
+The Linux installer turns these clamd commands on. On Windows, set them in `clamd.conf` yourself if your build ships them off.
+
+Endpoints pick actions up on their next heartbeat (within about a minute) and check in every 15 seconds while they have actions open. An action not picked up within 24 hours expires; a running action must report within 10 minutes (4 hours 15 minutes for scans). One scan runs at a time per endpoint. Results are kept for 90 days.
+
+**Scan folders.** The console can only scan folders that were allowed **on the endpoint itself**; the list lives in the agent's local config (`scan_roots` in `agent.yaml`) and the console cannot change it. Until one is set, scan requests are refused. A requested folder must be inside an allowed folder after symlinks are resolved. To set the list (it replaces the old one; no arguments turns scans off):
+
+- Linux: rerun the installer with `--scan-roots /srv,/var/www` (no token needed), or `sudo clamav-agent set-scan-roots /srv /var/www && sudo systemctl restart clamav-agent`
+- Windows: `& "$env:ProgramFiles\ClamAVAgent\clamav-agent.exe" set-scan-roots D:\Shares E:\Web; Restart-Service ClamAVAgent`
+
+clamd runs as its own user (`clamav` on Debian/Ubuntu), so it can only scan files that user can read; others are listed as "not scanned" with the reason. Scanning a large tree loads the machine like any clamd scan.
+
+**Output and export.** Each run opens a page that updates as endpoints report, with a link to each endpoint's full output. Export a run as CSV or JSON, or just the infected files of a scan as CSV; an endpoint's page exports its action history. Cells that a spreadsheet would treat as a formula are prefixed with `'`, since file names on an endpoint can be chosen by an attacker. Every queue and cancel, and every refused request, is recorded in the audit log.
+
 ## Checking status
 
 - Linux: `sudo clamav-agent status`, `systemctl status clamav-agent`, `journalctl -u clamav-agent -f`
@@ -130,6 +169,10 @@ sh install.sh --verify-only clamav-agent_linux_amd64 clamav-agent_linux_amd64.mi
 ## Troubleshooting
 
 **clamd `not_responding` with "permission denied" (Linux).** The agent user must be in the group that owns the clamd socket. Check `ls -l /run/clamav/clamd.ctl` and `id clamav-agent`. If the socket's group is `root`, set `LocalSocketGroup` (e.g. `clamav`) and `LocalSocketMode 660` in `clamd.conf`, restart clamd, then rerun `install.sh` (or `usermod -aG <group> clamav-agent && systemctl restart clamav-agent`).
+
+**clamd running, error "the VERSION command is disabled".** clamd answers PING but not VERSION, so the console shows no signature version. Set `EnableVersionCommand yes` in `clamd.conf` and run `systemctl restart clamav-daemon` (the Linux installer does this for you unless `--no-clamav-setup` was used). A ClamAV package upgrade may rewrite `clamd.conf`; if the error comes back, rerun the installer.
+
+**clamd `not_responding` with "i/o timeout" right after clamd starts.** clamd is still loading its databases (30 to 60 seconds, about 1.5 GB of RAM). The agent retries; check `systemctl status clamav-daemon` if it lasts.
 
 **clamd `not_installed`.** No clamd binary was found (`/usr/sbin/clamd`, `/usr/bin/clamd`, `/usr/local/sbin/clamd`, or `%ProgramFiles%\ClamAV\clamd.exe`) and clamd did not answer.
 

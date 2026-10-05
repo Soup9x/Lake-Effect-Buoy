@@ -3,6 +3,7 @@ package clamd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -197,6 +198,9 @@ func TestStatusConnectionRefusedTCP(t *testing.T) {
 }
 
 func TestParseVersion(t *testing.T) {
+	if _, err := ParseVersion("COMMAND UNAVAILABLE\x00"); !errors.Is(err, ErrVersionDisabled) || len(err.Error()) > MaxErrorLen {
+		t.Fatalf("disabled VERSION: %v", err)
+	}
 	loc := time.FixedZone("X", 2*3600)
 	v, err := parseVersionIn("ClamAV 1.4.1/27410/Tue Sep 30 08:01:00 2026\x00", loc)
 	if err != nil {
@@ -266,4 +270,78 @@ func FuzzParseVersion(f *testing.F) {
 			t.Fatal("date not UTC")
 		}
 	})
+}
+
+func TestParseScanLine(t *testing.T) {
+	cases := []struct {
+		line, root string
+		want       ScanLine
+		ok         bool
+	}{
+		{"/srv/www: OK", "/srv/www", ScanLine{Kind: ScanOK, Path: "/srv/www"}, true},
+		{"/srv/www/a.exe: Win.Test.EICAR_HDB-1 FOUND", "/srv/www", ScanLine{ScanFound, "/srv/www/a.exe", "Win.Test.EICAR_HDB-1"}, true},
+		{"/srv/www/x: lstat() failed: Permission denied. ERROR", "/srv/www", ScanLine{ScanError, "/srv/www/x", "lstat() failed: Permission denied."}, true},
+		// A ": " inside the scanned root does not split the line early.
+		{"/srv/a: b/c.txt: Eicar FOUND", "/srv/a: b", ScanLine{ScanFound, "/srv/a: b/c.txt", "Eicar"}, true},
+		{`C:\Data\x.doc: Doc.Macro FOUND`, `C:\Data`, ScanLine{ScanFound, `C:\Data\x.doc`, "Doc.Macro"}, true},
+		{"garbage", "/srv", ScanLine{}, false},
+		{"no separator FOUND", "/srv", ScanLine{}, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseScanLine(c.line, c.root)
+		if ok != c.ok || got != c.want {
+			t.Errorf("%q: got %+v %v, want %+v %v", c.line, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestReloadStatsContScan(t *testing.T) {
+	l, sock := unixListener(t)
+	seen := make(chan string, 10)
+	fakeClamd(t, l, map[string]string{
+		"zRELOAD\x00":                 "RELOADING\x00",
+		"zSTATS\x00":                  "POOLS: 1\n\nSTATE: VALID PRIMARY\nTHREADS: live 1  idle 0 max 10\nQUEUE: 0 items\nEND\x00",
+		"zCONTSCAN /srv/www\x00":      "/srv/www/a: Eicar FOUND\x00/srv/www/b: Permission denied. ERROR\x00",
+		"zCONTSCAN /srv/disabled\x00": "COMMAND UNAVAILABLE\x00",
+	}, seen)
+	c := New(Address{Network: "unix", Addr: sock})
+	ctx := context.Background()
+	if err := c.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := c.Stats(ctx)
+	if err != nil || !strings.Contains(stats, "THREADS: live 1") || strings.Contains(stats, "END") {
+		t.Fatalf("stats %q %v", stats, err)
+	}
+	var lines []string
+	if err := c.ContScan(ctx, "/srv/www", time.Minute, func(l string) { lines = append(lines, l) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || lines[0] != "/srv/www/a: Eicar FOUND" {
+		t.Fatalf("lines %q", lines)
+	}
+	// A path that could smuggle a second command never reaches clamd.
+	for _, bad := range []string{"/srv/www\x00zSHUTDOWN", "/srv\nSHUTDOWN", "relative"} {
+		if err := c.ContScan(ctx, bad, time.Minute, func(string) {}); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	close(seen)
+	for cmd := range seen {
+		if strings.Contains(cmd, "SHUTDOWN") {
+			t.Fatalf("clamd received %q", cmd)
+		}
+	}
+}
+
+func TestReloadStatsDisabled(t *testing.T) {
+	l, sock := unixListener(t)
+	fakeClamd(t, l, map[string]string{"zRELOAD\x00": "COMMAND UNAVAILABLE\x00", "zSTATS\x00": "COMMAND UNAVAILABLE\x00"}, nil)
+	c := New(Address{Network: "unix", Addr: sock})
+	if err := c.Reload(context.Background()); err == nil || !strings.Contains(err.Error(), "EnableReloadCommand") {
+		t.Errorf("reload: %v", err)
+	}
+	if _, err := c.Stats(context.Background()); err == nil || !strings.Contains(err.Error(), "EnableStatsCommand") {
+		t.Errorf("stats: %v", err)
+	}
 }

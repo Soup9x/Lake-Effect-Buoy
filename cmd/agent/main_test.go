@@ -156,3 +156,28 @@ func TestEnrollWithPrivateCA(t *testing.T) {
 		t.Fatalf("run with broken CA file: exit %d after %d heartbeats", code, beats.Load())
 	}
 }
+
+func TestSetScanRoots(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "agent.yaml")
+	if err := os.WriteFile(cfg, []byte("server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if code := realMain([]string{"set-scan-roots", "--config", cfg, root, root + "/", "/nonexistent-dir"}); code != exitOK {
+		t.Fatalf("exit %d", code)
+	}
+	b, _ := os.ReadFile(cfg)
+	if !strings.Contains(string(b), "scan_roots:") || strings.Count(string(b), root) != 1 || !strings.Contains(string(b), "server_url: https://h") {
+		t.Fatalf("config:\n%s", b)
+	}
+	if code := realMain([]string{"set-scan-roots", "--config", cfg, "relative/dir"}); code != exitUsage {
+		t.Fatalf("relative root: exit %d", code)
+	}
+	if code := realMain([]string{"set-scan-roots", "--config", cfg}); code != exitOK {
+		t.Fatalf("clear: exit %d", code)
+	}
+	if b, _ := os.ReadFile(cfg); strings.Contains(string(b), "scan_roots") {
+		t.Fatalf("roots not cleared:\n%s", b)
+	}
+}

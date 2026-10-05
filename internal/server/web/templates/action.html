@@ -1,0 +1,48 @@
+{{define "content"}}
+{{$a := .Data.Action}}
+<p class="small"><a href="/agents/{{$a.AgentID}}">← {{$a.Hostname}}</a> · <a href="/jobs/{{$a.JobID}}">Job</a></p>
+<h1>{{.Data.Label}} on {{$a.Hostname}}</h1>
+<div class="card">
+<table>
+  <tr><th>Tenant</th><td>{{$a.TenantName}}</td></tr>
+  <tr><th>Action</th><td>{{.Data.Label}}{{with .Data.Path}} <code>{{.}}</code>{{end}}</td></tr>
+  <tr><th>Status</th><td><span class="{{statusClass $a.Status}}">{{$a.Status}}</span> <span class="small">{{actionSummary $a}}</span></td></tr>
+  <tr><th>Queued</th><td>{{fmtTime $a.CreatedAt}}</td></tr>
+  <tr><th>Picked up</th><td>{{fmtTime $a.SentAt}}</td></tr>
+  <tr><th>Started / finished</th><td>{{fmtTime $a.StartedAt}}{{if $a.FinishedAt}} → {{fmtTime $a.FinishedAt}}{{end}}</td></tr>
+  {{if $a.Error}}<tr><th>Error</th><td class="bad">{{$a.Error}}</td></tr>{{end}}
+</table>
+</div>
+{{with .Data.Check}}
+<h2>clamd</h2>
+<table>
+  <tr><th>clamd</th><td><span class="{{clamdClass .Status}}">{{.Status}}</span>{{with .Error}} <span class="small muted">{{.}}</span>{{end}}</td></tr>
+  <tr><th>Engine</th><td>{{.EngineVersion}}</td></tr>
+  <tr><th>Signatures</th><td>{{if .SignatureVersion}}{{.SignatureVersion}}, {{fmtTime .SignatureDate}}{{else}}n/a{{end}}</td></tr>
+</table>
+{{end}}
+{{with .Data.Scan}}
+<h2>Scan of <code>{{.Path}}</code></h2>
+<p>{{if .InfectedTotal}}<span class="bad">{{.InfectedTotal}} infected file{{if ne .InfectedTotal 1}}s{{end}}</span>{{else}}<span class="ok">No infected files found</span>{{end}} · {{.ErrorsTotal}} file{{if ne .ErrorsTotal 1}}s{{end}} could not be scanned{{if .Truncated}} · <span class="warn">the lists below were cut to fit; the totals are complete</span>{{end}}</p>
+{{if .Infected}}
+<h2>Infected files</h2>
+<table>
+  <thead><tr><th>File</th><th>Signature</th></tr></thead>
+  <tbody>{{range .Infected}}<tr><td><code>{{.Path}}</code></td><td class="bad">{{.Signature}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}
+{{if .Errors}}
+<h2>Not scanned</h2>
+<p class="small muted">clamd runs as its own user (usually <code>clamav</code>), so files it cannot read are listed here rather than scanned.</p>
+<table>
+  <thead><tr><th>File</th><th>Error</th></tr></thead>
+  <tbody>{{range .Errors}}<tr><td><code>{{.Path}}</code></td><td>{{.Error}}</td></tr>{{end}}</tbody>
+</table>
+{{end}}
+{{end}}
+{{if $a.Output}}
+<h2>Output</h2>
+<pre class="code output">{{$a.Output}}</pre>
+{{end}}
+<p class="small">Export: <a href="/jobs/{{$a.JobID}}/export.csv">job CSV</a> · <a href="/jobs/{{$a.JobID}}/export.json">job JSON</a>{{if .Data.Scan}} · <a href="/jobs/{{$a.JobID}}/infections.csv">infected files CSV</a>{{end}}</p>
+{{end}}

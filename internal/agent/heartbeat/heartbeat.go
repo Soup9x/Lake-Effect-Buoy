@@ -58,16 +58,22 @@ type Agent struct {
 	Version   string
 	// Collect builds the heartbeat body (SentAt is filled in by the loop).
 	Collect func(ctx context.Context) protocol.HeartbeatRequest
-	// Dispatch handles one action from the server.
-	Dispatch func(ctx context.Context, a protocol.Action)
+	// Dispatch handles one action from the server and calls report exactly
+	// once with its result (possibly later, from another goroutine).
+	Dispatch func(ctx context.Context, a protocol.Action, report func(protocol.ActionResult))
 	Logger   *slog.Logger
 
 	// Test hooks. Sleep must return ctx.Err() when ctx is done.
 	Sleep func(ctx context.Context, d time.Duration) error
 	Rand  func() float64 // uniform in [0,1)
 
-	cred string
+	cred    string
+	results chan protocol.ActionResult
+	unsent  []protocol.ActionResult
 }
+
+// maxUnsent caps results kept for retry while the console is unreachable.
+const maxUnsent = 200
 
 // result classifies one request.
 type result int
@@ -77,6 +83,7 @@ const (
 	resRevoked
 	resUnauthorized // a 401 that is not agent_revoked
 	resTransient
+	resRejected // the server refused the request itself (4xx); retrying will not help
 )
 
 // Run sends a heartbeat immediately, then keeps going until ctx is cancelled
@@ -97,9 +104,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	a.cred = cred
+	if a.results == nil {
+		a.results = make(chan protocol.ActionResult, 64)
+	}
 
 	failures := 0
 	for {
+		// Results of scans that finished since the last heartbeat.
+		if err := a.flushResults(ctx); errors.Is(err, ErrRevoked) {
+			return ErrRevoked
+		}
 		resp, res, retryAfter, err := a.heartbeat(ctx)
 		if ctx.Err() != nil {
 			return nil
@@ -119,7 +133,10 @@ func (a *Agent) Run(ctx context.Context) error {
 				}
 			}
 			for _, act := range resp.Actions {
-				a.Dispatch(ctx, act)
+				a.Dispatch(ctx, act, a.report)
+			}
+			if err := a.flushResults(ctx); errors.Is(err, ErrRevoked) {
+				return ErrRevoked
 			}
 			wait = a.jitter(ClampInterval(resp.HeartbeatIntervalSeconds))
 			a.Logger.Debug("heartbeat sent", "next_in", wait.Round(time.Second))
@@ -143,6 +160,48 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// report queues an action result for the console. It blocks only if 64
+// results are already waiting, which bounds memory.
+func (a *Agent) report(r protocol.ActionResult) { a.results <- r }
+
+// flushResults sends queued action results. Results the server refuses are
+// dropped; on network trouble they are kept (up to maxUnsent) for the next
+// round. Returns ErrRevoked if the console says this agent is revoked.
+func (a *Agent) flushResults(ctx context.Context) error {
+	for {
+		select {
+		case r := <-a.results:
+			a.unsent = append(a.unsent, r)
+			continue
+		default:
+		}
+		break
+	}
+	if over := len(a.unsent) - maxUnsent; over > 0 {
+		a.Logger.Error("dropping action results the console has not accepted yet", "count", over)
+		a.unsent = a.unsent[over:]
+	}
+	for len(a.unsent) > 0 {
+		r := a.unsent[0]
+		var ack struct{}
+		res, _, err := a.post(ctx, protocol.PathActionResult, r, &ack)
+		switch res {
+		case resOK:
+			a.unsent = a.unsent[1:]
+		case resRejected:
+			a.Logger.Warn("console refused an action result; dropping it", "action_id", r.ID, "error", err)
+			a.unsent = a.unsent[1:]
+		case resRevoked:
+			a.Logger.Error("CONSOLE REPORTS THIS AGENT IS REVOKED (401 agent_revoked) while sending results; stopping.")
+			return ErrRevoked
+		default:
+			a.Logger.Warn("could not send action results; will retry", "pending", len(a.unsent), "error", err)
+			return err
+		}
+	}
+	return nil
 }
 
 // ClampInterval converts the server's interval to a duration in [15s, 1h].
@@ -253,6 +312,10 @@ func (a *Agent) post(ctx context.Context, path string, in, out any) (result, tim
 			return resRevoked, 0, err
 		}
 		return resUnauthorized, 0, err
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone,
+		http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		code, msg := errorCode(data)
+		return resRejected, 0, fmt.Errorf("HTTP %d code=%q message=%q", resp.StatusCode, code, msg)
 	default:
 		code, msg := errorCode(data)
 		return resTransient, retryAfter(resp), fmt.Errorf("HTTP %d code=%q message=%q", resp.StatusCode, code, msg)

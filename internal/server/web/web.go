@@ -67,6 +67,20 @@ func (s *Server) Handler() http.Handler {
 	p("GET /agents/{id}", s.agentPage)
 	p("POST /agents/{id}/revoke", s.agentRevoke)
 	p("POST /agents/{id}/rotate", s.agentRotate)
+	p("POST /agents/{id}/actions", s.agentActionCreate)
+	p("GET /agents/{id}/actions/rows", s.agentActionRows)
+	p("GET /agents/{id}/actions/export.csv", s.agentActionsExport("csv"))
+	p("GET /agents/{id}/actions/export.json", s.agentActionsExport("json"))
+	p("GET /tenants/{id}/run", s.runPage)
+	p("POST /tenants/{id}/jobs", s.jobCreate)
+	p("GET /jobs", s.jobsPage)
+	p("GET /jobs/{id}", s.jobPage)
+	p("GET /jobs/{id}/rows", s.jobRows)
+	p("POST /jobs/{id}/cancel", s.jobCancel)
+	p("GET /jobs/{id}/export.csv", s.jobExport("csv"))
+	p("GET /jobs/{id}/export.json", s.jobExport("json"))
+	p("GET /jobs/{id}/infections.csv", s.jobExport("infections"))
+	p("GET /actions/{id}", s.actionPage)
 	p("GET /audit", s.auditPage)
 	p("GET /users", s.usersPage)
 	p("POST /users", s.userCreate)
@@ -141,6 +155,7 @@ var flashes = map[string]string{
 	"token_revoked": "Enrollment token revoked.", "agent_revoked": "Agent revoked.",
 	"rotation_requested": "Credential rotation requested; it happens on the agent's next heartbeat.",
 	"user_created":       "User created.", "user_disabled": "User disabled.", "password_changed": "Password changed. Other sessions were signed out.",
+	"job_cancelled": "Actions not yet picked up by their endpoints were cancelled.",
 }
 
 func flash(r *http.Request) string { return flashes[r.URL.Query().Get("msg")] }
@@ -598,17 +613,32 @@ func (s *Server) agentPage(w http.ResponseWriter, r *http.Request) {
 		s.serverError(w, r, err)
 		return
 	}
-	events, err := store.ListAgentEvents(r.Context(), s.DB, id, 50)
+	s.renderAgent(w, r, http.StatusOK, a, "")
+}
+
+type agentData struct {
+	Agent        *store.Agent
+	Events       []store.AgentEvent
+	Actions      agentActionsData
+	Choices      []actionChoice
+	Now          time.Time
+	OfflineAfter time.Duration
+}
+
+func (s *Server) renderAgent(w http.ResponseWriter, r *http.Request, status int, a *store.Agent, errMsg string) {
+	events, err := store.ListAgentEvents(r.Context(), s.DB, a.ID, 50)
 	if err != nil {
 		s.serverError(w, r, err)
 		return
 	}
-	s.render(w, r, http.StatusOK, "agent", page{Title: a.Hostname, Flash: flash(r), Data: struct {
-		Agent        *store.Agent
-		Events       []store.AgentEvent
-		Now          time.Time
-		OfflineAfter time.Duration
-	}{a, events, time.Now(), s.OfflineAfter}})
+	acts, err := store.ListAgentActions(r.Context(), s.DB, a.ID, 20)
+	if err != nil {
+		s.serverError(w, r, err)
+		return
+	}
+	s.render(w, r, status, "agent", page{Title: a.Hostname, Flash: flash(r), Error: errMsg, Data: agentData{
+		Agent: a, Events: events, Actions: agentActionsData{AgentID: a.ID, Actions: acts}, Choices: actionChoices(),
+		Now: time.Now(), OfflineAfter: s.OfflineAfter}})
 }
 
 func (s *Server) agentAction(w http.ResponseWriter, r *http.Request, action audit.Action, msg string,

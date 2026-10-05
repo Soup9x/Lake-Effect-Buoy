@@ -43,7 +43,12 @@ type Config struct {
 	// console; the system trust store is not used. The installer writes it
 	// after checking the CA's fingerprint.
 	CACertFile string `yaml:"ca_cert_file,omitempty"`
-	LogLevel   string `yaml:"log_level,omitempty"`
+	// ScanRoots are the only directories the console may ask this agent to
+	// scan (scan_path), with everything under them. Set locally (installer
+	// --scan-roots, or clamav-agent set-scan-roots); the server cannot change
+	// it. Empty means scans are refused.
+	ScanRoots []string `yaml:"scan_roots,omitempty"`
+	LogLevel  string   `yaml:"log_level,omitempty"`
 	// InsecureHTTPForTesting allows an http:// server URL. Never use it in
 	// production; the agent logs a loud warning whenever it is set.
 	InsecureHTTPForTesting bool `yaml:"insecure_http_for_testing,omitempty"`
@@ -109,6 +114,12 @@ func (c *Config) Validate() error {
 	if c.CACertFile != "" && (!filepath.IsAbs(c.CACertFile) || strings.ContainsRune(c.CACertFile, 0)) {
 		return errors.New("config: ca_cert_file must be an absolute path")
 	}
+	for i, r := range c.ScanRoots {
+		if err := ValidateScanRoot(r); err != nil {
+			return fmt.Errorf("config: scan_roots: %w", err)
+		}
+		c.ScanRoots[i] = filepath.Clean(r)
+	}
 	switch c.LogLevel {
 	case "":
 		c.LogLevel = "info"
@@ -159,6 +170,20 @@ func (c *Config) Pin() ([]byte, error) {
 		return nil, errors.New("config: ca_cert_pin must be the base64 SHA-256 of a SubjectPublicKeyInfo (44 characters)")
 	}
 	return b, nil
+}
+
+// ValidateScanRoot checks one scan root: an absolute path on this system,
+// without control characters.
+func ValidateScanRoot(r string) error {
+	if !filepath.IsAbs(r) {
+		return fmt.Errorf("%q is not an absolute path", r)
+	}
+	for _, c := range r {
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("%q contains a control character", r)
+		}
+	}
+	return nil
 }
 
 // RootCAs returns the CAs from ca_cert_file, or nil (use the system trust

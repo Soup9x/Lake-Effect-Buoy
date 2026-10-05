@@ -49,6 +49,9 @@ type harness struct {
 	waits  []time.Duration
 	rotate step
 	acts   []protocol.Action
+	// result replies to each POST /actions/result in turn (default 200).
+	resultSteps []step
+	results     []protocol.ActionResult
 }
 
 func newHarness(t *testing.T, steps ...step) *harness {
@@ -77,6 +80,20 @@ func newHarness(t *testing.T, steps ...step) *harness {
 		}
 		h.steps[i](w, r)
 	})
+	mux.HandleFunc("POST "+protocol.PathActionResult, func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		var res protocol.ActionResult
+		if err := json.NewDecoder(r.Body).Decode(&res); err != nil {
+			t.Errorf("bad result body: %v", err)
+		}
+		h.results = append(h.results, res)
+		if i := len(h.results) - 1; i < len(h.resultSteps) {
+			h.resultSteps[i](w, r)
+			return
+		}
+		jsonReply(200, struct{}{})(w, r)
+	})
 	mux.HandleFunc("POST "+protocol.PathRotate, func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -102,9 +119,12 @@ func (h *harness) run(n int) error {
 		Collect: func(context.Context) protocol.HeartbeatRequest {
 			return protocol.HeartbeatRequest{Hostname: "h", ClamAV: protocol.ClamAVStatus{Status: protocol.ClamdRunning}}
 		},
-		Dispatch: func(_ context.Context, act protocol.Action) { h.acts = append(h.acts, act) },
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Rand:     func() float64 { return 0.5 },
+		Dispatch: func(_ context.Context, act protocol.Action, report func(protocol.ActionResult)) {
+			h.acts = append(h.acts, act)
+			report(protocol.ActionResult{ID: act.ID, Outcome: protocol.OutcomeDone})
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Rand:   func() float64 { return 0.5 },
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			h.waits = append(h.waits, d)
 			if len(h.waits) >= n {
@@ -277,5 +297,65 @@ func TestMissingCredential(t *testing.T) {
 	a := &Agent{Store: credstore.Store{Path: filepath.Join(t.TempDir(), "none")}}
 	if err := a.Run(context.Background()); !errors.Is(err, credstore.ErrNotFound) {
 		t.Fatal(err)
+	}
+}
+
+func withActions(ids ...string) step {
+	var acts []protocol.Action
+	for _, id := range ids {
+		acts = append(acts, protocol.Action{ID: id, Type: protocol.ActionClamdCheck})
+	}
+	return jsonReply(200, protocol.HeartbeatResponse{HeartbeatIntervalSeconds: 15, ServerTime: time.Now(), Actions: acts})
+}
+
+// recorded returns the IDs of the results the server received, in order.
+func (h *harness) recorded() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ids []string
+	for _, r := range h.results {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+func TestActionResultsSent(t *testing.T) {
+	h := newHarness(t, withActions("a1", "a2"))
+	if err := h.run(1); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(h.recorded(), ","); got != "a1,a2" {
+		t.Fatalf("results %q", got)
+	}
+}
+
+func TestActionResultsRetriedAfterNetworkTrouble(t *testing.T) {
+	h := newHarness(t, withActions("a1"), ok(60))
+	// The first attempt fails with a 503; the next round sends it again.
+	h.resultSteps = []step{apiErr(503, "internal")}
+	if err := h.run(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(h.recorded(), ","); got != "a1,a1" {
+		t.Fatalf("results %q, want a1 sent twice", got)
+	}
+}
+
+func TestRefusedActionResultDropped(t *testing.T) {
+	h := newHarness(t, withActions("a1", "a2"), ok(60))
+	h.resultSteps = []step{apiErr(409, "invalid_request")}
+	if err := h.run(2); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(h.recorded(), ","); got != "a1,a2" {
+		t.Fatalf("results %q, want a1 dropped and a2 sent", got)
+	}
+}
+
+func TestRevokedWhileSendingResults(t *testing.T) {
+	h := newHarness(t, withActions("a1"))
+	h.resultSteps = []step{apiErr(401, protocol.ErrAgentRevoked)}
+	if err := h.run(5); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("got %v, want ErrRevoked", err)
 	}
 }

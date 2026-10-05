@@ -1,0 +1,43 @@
+{{define "content"}}
+{{$t := .Data.Tenant}}{{$f := .Data.Form}}
+<p class="small"><a href="/tenants/{{$t.ID}}">← {{$t.Name}}</a></p>
+<h1>Run an action on {{$t.Name}} endpoints</h1>
+<form method="post" action="/tenants/{{$t.ID}}/jobs">
+{{template "csrf" .}}
+<div class="card">
+  <div class="form inline">
+    <label>Action
+      <select name="type" required>
+        {{range .Data.Choices}}<option value="{{.Type}}" {{if eq (print .Type) $f.Type}}selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+    </label>
+    <label>Folder to scan <span class="small">(Scan a folder only)</span><input type="text" name="path" maxlength="1024" value="{{$f.Path}}" placeholder="/srv/www"></label>
+  </div>
+  <h2>Endpoints</h2>
+  <p>
+    <label><input type="radio" name="target" value="online" {{if eq $f.Target "online"}}checked{{end}}> All online endpoints</label><br>
+    <label><input type="radio" name="target" value="all" {{if eq $f.Target "all"}}checked{{end}}> All endpoints, including offline ones (they run it when they next check in, within 24 hours)</label><br>
+    <label><input type="radio" name="target" value="selected" {{if eq $f.Target "selected"}}checked{{end}}> Only the endpoints ticked below</label>
+  </p>
+  <p><button type="submit">Queue action</button></p>
+  {{template "action_help"}}
+</div>
+<table>
+  <thead><tr><th></th><th>Hostname</th><th>Status</th><th>OS</th><th>clamd</th></tr></thead>
+  <tbody>
+  {{$now := .Data.Now}}{{$off := .Data.OfflineAfter}}
+  {{range .Data.Agents}}
+    <tr>
+      <td><input type="checkbox" name="agent_id" value="{{.ID}}" aria-label="{{.Hostname}}" {{if index $f.Selected (print .ID)}}checked{{end}}></td>
+      <td><a href="/agents/{{.ID}}">{{.Hostname}}</a></td>
+      <td>{{if .Online $now $off}}<span class="dot on"></span>online{{else}}<span class="dot off"></span>offline{{end}}</td>
+      <td>{{.OSName}}</td>
+      <td><span class="{{clamdClass .ClamdStatus}}">{{.ClamdStatus}}</span></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">This tenant has no endpoints.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+</form>
+{{end}}

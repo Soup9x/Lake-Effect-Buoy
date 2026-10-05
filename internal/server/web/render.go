@@ -78,6 +78,11 @@ var funcs = template.FuncMap{
 		}
 		return "muted"
 	},
+	"actionLabel":   actionLabel,
+	"actionSummary": actionSummary,
+	"statusClass":   statusClass,
+	"scanInfected":  scanInfected,
+	"paramPath":     paramPath,
 	"json": func(v any) string {
 		b, _ := json.Marshal(v)
 		return string(b)
@@ -101,7 +106,7 @@ func ago(d time.Duration) string {
 type templates map[string]*template.Template
 
 func loadTemplates() templates {
-	pages := []string{"login", "mfa", "tenants", "tenant", "agent", "audit", "users", "account"}
+	pages := []string{"login", "mfa", "tenants", "tenant", "agent", "audit", "users", "account", "run", "job", "jobs", "action"}
 	t := templates{}
 	for _, p := range pages {
 		t[p] = template.Must(template.New(p).Funcs(funcs).ParseFS(templateFS, "templates/layout.html", "templates/tenants.html", "templates/"+p+".html"))

@@ -18,6 +18,7 @@
   </label>
   <label><span><input type="checkbox" name="revoked" value="1" {{if .Data.Filter.Revoked}}checked{{end}}> include revoked</span></label>
   <button type="submit" class="secondary">Filter</button>
+  {{if not $t.ArchivedAt}}<a class="button" href="/tenants/{{$t.ID}}/run">Run action…</a>{{end}}
 </form>
 <p></p>
 {{template "agents_table" .Data}}

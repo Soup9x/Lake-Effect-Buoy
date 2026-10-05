@@ -40,6 +40,10 @@ const (
 	AgentRotateRequest  Action = "agent.rotate_requested"
 	AgentRotate         Action = "agent.credential_rotated"
 
+	// Allowlisted agent actions queued from the console (CLAUDE.md rule 1).
+	ActionQueue  Action = "agent_action.queue"
+	ActionCancel Action = "agent_action.cancel"
+
 	// AccessDenied records an authenticated request that failed authorization
 	// (CSRF failure, insufficient auth level, IP not allowed).
 	AccessDenied Action = "access.denied"

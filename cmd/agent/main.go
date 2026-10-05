@@ -37,6 +37,8 @@ func realMain(args []string) int {
 		return enrollCmd(args[1:])
 	case "run":
 		return runCmd(args[1:])
+	case "set-scan-roots":
+		return setScanRootsCmd(args[1:])
 	case "status":
 		return statusCmd(args[1:])
 	case "verify":
@@ -61,6 +63,9 @@ commands:
          enroll this machine; the token is read from CAV_ENROLL_TOKEN or stdin
   run [--config PATH]           run the heartbeat loop (foreground / service)
   status [--config PATH]        show configuration, credential presence and clamd status
+  set-scan-roots [--config PATH] [DIR ...]
+                                set the only directories the console may ask this machine
+                                to scan (none: scans are refused); restart the agent after
   verify FILE SIGFILE           verify a minisign signature with the release key
   version                       print the version
 `)

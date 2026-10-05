@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -189,7 +190,7 @@ func runAgent(ctx context.Context, cfgPath, credPath string) int {
 	}
 	addr, _ := clamd.ParseAddress(cfg.Clamd.Address)
 	cc := clamd.New(addr)
-	disp := &actions.Dispatcher{Logger: logger}
+	disp := &actions.Dispatcher{Logger: logger, Clamd: cc, ScanRoots: cfg.ScanRoots}
 
 	lastStatus := ""
 	agent := &heartbeat.Agent{
@@ -212,7 +213,7 @@ func runAgent(ctx context.Context, cfgPath, credPath string) int {
 				ClamAV:    st,
 			}
 		},
-		Dispatch: func(ctx context.Context, a protocol.Action) { disp.Dispatch(ctx, a) },
+		Dispatch: disp.Dispatch,
 	}
 	err = agent.Run(ctx)
 	switch {
@@ -226,6 +227,53 @@ func runAgent(ctx context.Context, cfgPath, credPath string) int {
 		logger.Error("cannot start heartbeat loop", "error", err)
 		return exitConfig
 	}
+}
+
+// ---- set-scan-roots ----
+
+// setScanRootsCmd replaces scan_roots in the local config. It is the only
+// way to widen what the console may scan, and it needs local root access.
+func setScanRootsCmd(args []string) int {
+	fs := flag.NewFlagSet("set-scan-roots", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	cfgPath := fs.String("config", config.ConfigPath(), "config file path")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	roots := []string{}
+	seen := map[string]bool{}
+	for _, r := range fs.Args() {
+		if err := config.ValidateScanRoot(r); err != nil {
+			fmt.Fprintln(os.Stderr, "set-scan-roots:", err)
+			return exitUsage
+		}
+		r = filepath.Clean(r)
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		if st, err := os.Stat(r); err != nil || !st.IsDir() {
+			fmt.Fprintf(os.Stderr, "WARNING: %s is not an existing directory; scans under it will fail until it exists\n", r)
+		}
+		roots = append(roots, r)
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "set-scan-roots:", err)
+		return exitError
+	}
+	cfg.ScanRoots = roots
+	if err := config.Save(*cfgPath, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "set-scan-roots:", err)
+		return exitError
+	}
+	if len(roots) == 0 {
+		fmt.Println("Scans are now disabled on this machine.")
+	} else {
+		fmt.Printf("The console may now scan: %s\n", strings.Join(roots, ", "))
+	}
+	fmt.Println("Restart the agent to apply it (Linux: systemctl restart clamav-agent; Windows: Restart-Service ClamAVAgent).")
+	return exitOK
 }
 
 // ---- status ----
@@ -247,6 +295,11 @@ func statusCmd(args []string) int {
 		fmt.Printf("  server_url: %s\n", cfg.ServerURL)
 		fmt.Printf("  clamd:      %s\n", cfg.Clamd.Address)
 		fmt.Printf("  cert pin:   %v\n", cfg.CACertPin != "")
+		if len(cfg.ScanRoots) == 0 {
+			fmt.Printf("  scan_roots: none (scans from the console are refused)\n")
+		} else {
+			fmt.Printf("  scan_roots: %s\n", strings.Join(cfg.ScanRoots, ", "))
+		}
 		if cfg.CACertFile != "" {
 			fmt.Printf("  ca_cert:    %s", cfg.CACertFile)
 			if _, err := cfg.RootCAs(); err != nil {

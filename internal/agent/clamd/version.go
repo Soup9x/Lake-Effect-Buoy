@@ -25,6 +25,11 @@ const ctimeLayout = "Mon Jan _2 15:04:05 2006"
 // maxSignatureVersion is a sanity bound; daily.cvd is in the tens of thousands.
 const maxSignatureVersion = 10_000_000
 
+// ErrVersionDisabled means clamd answered VERSION with COMMAND UNAVAILABLE:
+// the command is switched off in clamd.conf (ClamAV 1.5 packages may ship it
+// that way).
+var ErrVersionDisabled = errors.New(`clamd: the VERSION command is disabled; set "EnableVersionCommand yes" in clamd.conf and restart clamd`)
+
 // ParseVersion parses "ClamAV 1.4.1/27410/Tue Sep 30 08:01:00 2026" or the
 // bare "ClamAV 1.4.1" (no signature databases loaded). The date is
 // interpreted in time.Local and returned in UTC.
@@ -34,6 +39,9 @@ func ParseVersion(reply string) (VersionInfo, error) {
 
 func parseVersionIn(reply string, loc *time.Location) (VersionInfo, error) {
 	s := strings.TrimRight(reply, "\x00\r\n ")
+	if s == "COMMAND UNAVAILABLE" {
+		return VersionInfo{}, ErrVersionDisabled
+	}
 	rest, ok := strings.CutPrefix(s, "ClamAV ")
 	if !ok {
 		return VersionInfo{}, fmt.Errorf("clamd: unexpected VERSION reply %q", truncate(s, 60))

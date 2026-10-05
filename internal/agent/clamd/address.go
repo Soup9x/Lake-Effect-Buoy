@@ -1,7 +1,8 @@
 // Package clamd is a minimal client for the local clamd daemon.
 //
-// It only ever sends the fixed commands zPING and zVERSION, and only connects
-// to a Unix socket or a loopback TCP address. It never listens.
+// It only ever sends the fixed commands PING, VERSION, RELOAD, STATS and
+// CONTSCAN <path> (the path validated by the caller and again here), and only
+// connects to a Unix socket or a loopback TCP address. It never listens.
 package clamd
 
 import (

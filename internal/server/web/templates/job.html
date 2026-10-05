@@ -1,0 +1,40 @@
+{{define "content"}}
+{{$j := .Data.Job}}
+<p class="small"><a href="/tenants/{{$j.TenantID}}">← {{$j.TenantName}}</a> · <a href="/jobs">All actions</a></p>
+<h1>{{.Data.Label}}{{with .Data.Path}} <code>{{.}}</code>{{end}}</h1>
+<p class="muted small">Queued {{fmtTime $j.CreatedAt}} by {{$j.CreatorEmail}} for {{$j.Total}} endpoint{{if ne $j.Total 1}}s{{end}}.</p>
+<div class="actions">
+  <a class="button secondary" href="/jobs/{{$j.ID}}/export.csv">Export CSV</a>
+  <a class="button secondary" href="/jobs/{{$j.ID}}/export.json">Export JSON</a>
+  {{if eq $j.Type "scan_path"}}<a class="button secondary" href="/jobs/{{$j.ID}}/infections.csv">Infected files (CSV)</a>{{end}}
+  {{if $j.Open}}<button class="danger" hx-post="/jobs/{{$j.ID}}/cancel" hx-confirm="Cancel the actions endpoints have not picked up yet? Actions already running finish normally.">Cancel waiting actions</button>{{end}}
+</div>
+{{template "job_results" .Data}}
+{{end}}
+
+{{define "job_results"}}
+{{$j := .Job}}
+<div id="job-results"{{if not $j.Finished}} hx-get="/jobs/{{$j.ID}}/rows" hx-trigger="every 5s" hx-swap="outerHTML" hx-headers='{"X-Background-Refresh":"1"}'{{end}}>
+<p><span class="ok">{{$j.Done}} done</span> · <span class="{{if $j.Failed}}bad{{else}}muted{{end}}">{{$j.Failed}} failed or not run</span> · <span class="muted">{{$j.Open}} waiting</span>{{if not $j.Finished}} <span class="small muted">(updating)</span>{{end}}</p>
+<table>
+  <thead><tr><th>Endpoint</th><th>Status</th><th>Result</th><th>Finished</th><th></th></tr></thead>
+  <tbody>
+  {{range .Actions}}
+    <tr>
+      <td><a href="/agents/{{.AgentID}}">{{.Hostname}}</a></td>
+      <td><span class="{{statusClass .Status}}">{{.Status}}</span></td>
+      <td class="small">{{if scanInfected .}}<span class="bad">{{actionSummary .}}</span>{{else}}{{actionSummary .}}{{end}}</td>
+      <td class="small">{{fmtTime .FinishedAt}}</td>
+      <td><a href="/actions/{{.ID}}">Output</a></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No endpoints.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{if eq (len .Actions) 1}}{{with index .Actions 0}}{{if .Output}}
+<h2>Output from {{.Hostname}}</h2>
+<pre class="code output">{{.Output}}</pre>
+{{end}}{{end}}{{end}}
+</div>
+{{end}}

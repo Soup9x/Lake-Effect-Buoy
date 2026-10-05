@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>Actions</h1>
+<p class="small muted">The latest 200 actions queued from this console. To run one, open an endpoint, or use "Run action" on a tenant's endpoints page. Results are kept for 90 days.</p>
+<table>
+  <thead><tr><th>Queued</th><th>Tenant</th><th>Action</th><th>By</th><th>Endpoints</th><th>Progress</th></tr></thead>
+  <tbody>
+  {{range .Data}}
+    <tr>
+      <td><a href="/jobs/{{.ID}}">{{fmtTime .CreatedAt}}</a></td>
+      <td><a href="/tenants/{{.TenantID}}">{{.TenantName}}</a></td>
+      <td>{{actionLabel .Type}}{{with paramPath .Params}} <code>{{.}}</code>{{end}}</td>
+      <td class="small">{{.CreatorEmail}}</td>
+      <td>{{.Total}}</td>
+      <td class="small"><span class="ok">{{.Done}} done</span>{{if .Failed}} · <span class="bad">{{.Failed}} failed</span>{{end}}{{if .Open}} · <span class="muted">{{.Open}} waiting</span>{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="6" class="muted">No actions yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

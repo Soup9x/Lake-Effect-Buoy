@@ -135,6 +135,10 @@ Copy the contents of `dist/downloads/` (files and their `.minisig`) into the ser
 - Server logs are JSON on stdout: `docker compose logs -f server`.
 - An agent counts as offline after `AGENT_OFFLINE_AFTER_SECONDS` (default 180) without a heartbeat. The server records `went_offline` and `went_online` events on each agent's page.
 
+## Agent actions
+
+Admins can queue a fixed set of ClamAV actions (check clamd, reload signatures, clamd stats, scan a folder) on one endpoint or a batch, from the endpoint page or a tenant's **Run action…** button; **Actions** in the top bar lists recent runs. See docs/install-agent.md, "Actions from the console", for what each does and how endpoints allow folder scans. Undelivered actions expire after 24 hours, and the server deletes runs older than 90 days.
+
 ## Upgrades
 
 ```sh

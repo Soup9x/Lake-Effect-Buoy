@@ -48,7 +48,16 @@ func (a *API) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST "+protocol.PathEnroll, a.enroll)
 	mux.Handle("POST "+protocol.PathHeartbeat, a.authenticated(a.heartbeat))
 	mux.Handle("POST "+protocol.PathRotate, a.authenticated(a.rotate))
+	mux.Handle("POST "+protocol.PathActionResult, a.authenticated(a.actionResult))
 }
+
+// Actions handed out per heartbeat, and how long after any action activity
+// the heartbeat stays short so follow-up actions are picked up quickly.
+const (
+	actionsPerHeartbeat = 10
+	fastWindow          = 5 * time.Minute
+	fastInterval        = 15 * time.Second
+)
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	httpx.WriteJSON(w, status, protocol.ErrorResponse{Error: protocol.ErrorBody{Code: code, Message: msg}})
@@ -300,8 +309,17 @@ func (a *API) heartbeat(w http.ResponseWriter, r *http.Request) {
 		upd.ClamdError = &v
 	}
 	ctx := r.Context()
+	var queued []store.QueuedAction
+	active := false
 	err := store.InTx(ctx, a.DB, func(tx pgx.Tx) error {
 		if err := store.RecordHeartbeat(ctx, tx, ag.ID, upd); err != nil {
+			return err
+		}
+		var err error
+		if queued, err = store.TakeQueuedActions(ctx, tx, ag.ID, actionsPerHeartbeat); err != nil {
+			return err
+		}
+		if active, err = store.AgentActionsActive(ctx, tx, ag.ID, fastWindow); err != nil {
 			return err
 		}
 		if ag.LastHeartbeatAt != nil && ag.ClamdStatus != req.ClamAV.Status {
@@ -321,11 +339,19 @@ func (a *API) heartbeat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, protocol.ErrInternal, "internal error")
 		return
 	}
+	interval := protocol.DefaultHeartbeatInterval
+	if active {
+		interval = fastInterval
+	}
+	actions := make([]protocol.Action, 0, len(queued))
+	for _, q := range queued {
+		actions = append(actions, protocol.Action{ID: q.ID.String(), Type: protocol.ActionType(q.Type), Params: q.Params})
+	}
 	httpx.WriteJSON(w, http.StatusOK, protocol.HeartbeatResponse{
-		HeartbeatIntervalSeconds: int(protocol.DefaultHeartbeatInterval.Seconds()),
+		HeartbeatIntervalSeconds: int(interval.Seconds()),
 		ServerTime:               a.now().UTC(),
 		RotateCredential:         ag.RotateRequestedAt != nil,
-		Actions:                  []protocol.Action{},
+		Actions:                  actions,
 	})
 }
 
@@ -355,4 +381,45 @@ func (a *API) rotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, protocol.RotateResponse{Credential: credential})
+}
+
+// actionResult stores an agent's result for an action that was sent to it.
+// Everything in it is untrusted: it is validated against the action's type
+// and stored for display (escaped) and export (formula-neutralised).
+func (a *API) actionResult(w http.ResponseWriter, r *http.Request) {
+	ag := agentFrom(r)
+	var req protocol.ActionResult
+	if !decode(w, r, &req) {
+		return
+	}
+	id, err := uuid.Parse(req.ID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, protocol.ErrInvalidRequest, "id is not a valid action id")
+		return
+	}
+	ctx := r.Context()
+	typ, err := store.SentActionType(ctx, a.DB, ag.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusConflict, protocol.ErrInvalidRequest, "no such action awaiting a result from this agent")
+		return
+	}
+	if err != nil {
+		a.Log.Error("action lookup failed", "err", err, "agent_id", ag.ID)
+		writeErr(w, http.StatusInternalServerError, protocol.ErrInternal, "internal error")
+		return
+	}
+	upd, err := validateActionResult(protocol.ActionType(typ), &req, a.now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, protocol.ErrInvalidRequest, err.Error())
+		return
+	}
+	if err := store.RecordActionResult(ctx, a.DB, ag.ID, id, upd); errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusConflict, protocol.ErrInvalidRequest, "no such action awaiting a result from this agent")
+		return
+	} else if err != nil {
+		a.Log.Error("store action result failed", "err", err, "agent_id", ag.ID)
+		writeErr(w, http.StatusInternalServerError, protocol.ErrInternal, "internal error")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, struct{}{})
 }

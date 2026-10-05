@@ -81,6 +81,9 @@ func downloads(dir string) http.Handler {
 	})
 }
 
+// ActionRetention is how long agent action results are kept.
+const ActionRetention = 90 * 24 * time.Hour
+
 // RunBackground runs periodic maintenance until ctx is cancelled.
 func RunBackground(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, log *slog.Logger) {
 	sweep := time.NewTicker(30 * time.Second)
@@ -97,9 +100,17 @@ func RunBackground(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, 
 			} else if n > 0 {
 				log.Info("agent online state changed", "count", n)
 			}
+			if n, err := store.ExpireActions(ctx, pool); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("action expiry failed", "err", err)
+			} else if n > 0 {
+				log.Info("agent actions expired", "count", n)
+			}
 		case <-cleanup.C:
 			if err := store.DeleteStaleSessions(ctx, pool, 7*24*time.Hour); err != nil && !errors.Is(err, context.Canceled) {
 				log.Error("session cleanup failed", "err", err)
+			}
+			if _, err := store.DeleteOldJobs(ctx, pool, ActionRetention); err != nil && !errors.Is(err, context.Canceled) {
+				log.Error("action history cleanup failed", "err", err)
 			}
 		}
 	}

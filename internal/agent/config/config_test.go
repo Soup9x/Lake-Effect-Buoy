@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,8 @@ func TestParseBad(t *testing.T) {
 		"bad level":     "server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\nlog_level: trace\n",
 		"two docs":      "server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\n---\nserver_url: https://evil\n",
 		"relative CA":   "server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\nca_cert_file: ca.pem\n",
+		"relative root": "server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\nscan_roots: [srv]\n",
+		"control root":  "server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\nscan_roots: [\"/srv\\nx\"]\n",
 	}
 	for name, y := range cases {
 		if c, err := Parse([]byte(y)); err == nil {
@@ -77,7 +80,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *got != *c {
+	if !reflect.DeepEqual(got, c) {
 		t.Fatalf("%+v != %+v", got, c)
 	}
 	b, _ := os.ReadFile(p)
@@ -132,5 +135,18 @@ func TestCACertFile(t *testing.T) {
 		t.Fatal("ca_cert_file set without being configured")
 	} else if pool, err := c.RootCAs(); pool != nil || err != nil {
 		t.Fatalf("no ca_cert_file: %v %v", pool, err)
+	}
+}
+
+func TestScanRoots(t *testing.T) {
+	c, err := Parse([]byte("server_url: https://h\nclamd: {address: tcp://127.0.0.1:3310}\nscan_roots: [/srv/www/, /home]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.ScanRoots, []string{"/srv/www", "/home"}) {
+		t.Fatalf("roots %q", c.ScanRoots)
+	}
+	if c, _ := Parse([]byte(goodYAML)); len(c.ScanRoots) != 0 {
+		t.Fatal("scan roots set by default")
 	}
 }

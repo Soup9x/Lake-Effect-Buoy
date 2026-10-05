@@ -24,6 +24,18 @@
   <button class="danger" hx-post="/agents/{{$a.ID}}/revoke" hx-confirm="Revoke {{$a.Hostname}}? The agent will stop and must be re-enrolled.">Revoke agent</button>
 </div>
 {{end}}
+<h2>Actions</h2>
+{{if not $a.RevokedAt}}
+<div class="card">
+<form class="inline" method="post" action="/agents/{{$a.ID}}/actions">
+  {{template "csrf" .}}
+  {{template "action_fields" .Data.Choices}}
+  <button type="submit">Run on {{$a.Hostname}}</button>
+</form>
+{{template "action_help"}}
+</div>
+{{end}}
+{{template "agent_actions" .Data.Actions}}
 <h2>Recent events</h2>
 <table>
   <thead><tr><th>When</th><th>Event</th><th>Details</th></tr></thead>
@@ -32,4 +44,26 @@
   {{else}}<tr><td colspan="3" class="muted">No events.</td></tr>{{end}}
   </tbody>
 </table>
+{{end}}
+
+{{define "agent_actions"}}
+<div id="agent-actions"{{if .AnyOpen}} hx-get="/agents/{{.AgentID}}/actions/rows" hx-trigger="every 5s" hx-swap="outerHTML" hx-headers='{"X-Background-Refresh":"1"}'{{end}}>
+<table>
+  <thead><tr><th>Queued</th><th>Action</th><th>Status</th><th>Result</th><th></th></tr></thead>
+  <tbody>
+  {{range .Actions}}
+    <tr>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>{{actionLabel .Type}}{{with paramPath .Params}} <code>{{.}}</code>{{end}}</td>
+      <td><span class="{{statusClass .Status}}">{{.Status}}</span></td>
+      <td class="small">{{if scanInfected .}}<span class="bad">{{actionSummary .}}</span>{{else}}{{actionSummary .}}{{end}}</td>
+      <td><a href="/actions/{{.ID}}">Output</a></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="5" class="muted">No actions run on this endpoint yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{if .Actions}}<p class="small">Export this endpoint's action history: <a href="/agents/{{.AgentID}}/actions/export.csv">CSV</a> · <a href="/agents/{{.AgentID}}/actions/export.json">JSON</a></p>{{end}}
+</div>
 {{end}}

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -439,5 +441,264 @@ func TestInstallCommandsPinPrivateCA(t *testing.T) {
 	body = newToken()
 	if !strings.Contains(body, "console CA published in the downloads directory is invalid") || (strings.Contains(body, "install.sh") && strings.Contains(body, "sudo sh")) {
 		t.Fatal("invalid CA file: expected an error and no install commands")
+	}
+}
+
+func TestAgentActionFlow(t *testing.T) {
+	e := setup(t, "127.0.0.0/8")
+	e.login()
+	tenantID, cred := e.enrollAgent()
+	ctx := context.Background()
+	agentID := uuid.MustParse(strings.SplitN(strings.TrimPrefix(cred, protocol.CredentialPrefix), ".", 2)[0])
+	var userID uuid.UUID
+	if err := e.pool.QueryRow(ctx, `SELECT id FROM users`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	jobID, n, err := store.CreateJob(ctx, e.pool, uuid.MustParse(tenantID), string(protocol.ActionClamdReload), json.RawMessage(`{}`), userID, []uuid.UUID{agentID, uuid.New()})
+	if err != nil || n != 1 {
+		t.Fatalf("create job: %v, queued %d (the unknown agent must be skipped)", err, n)
+	}
+
+	hbResp := func() protocol.HeartbeatResponse {
+		t.Helper()
+		b, _ := json.Marshal(hb)
+		req, _ := http.NewRequest("POST", e.srv.URL+protocol.PathHeartbeat, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+cred)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var out protocol.HeartbeatResponse
+		if resp.StatusCode != 200 || json.NewDecoder(resp.Body).Decode(&out) != nil {
+			t.Fatalf("heartbeat %d", resp.StatusCode)
+		}
+		return out
+	}
+	first := hbResp()
+	if len(first.Actions) != 1 || first.Actions[0].Type != protocol.ActionClamdReload || first.HeartbeatIntervalSeconds != 15 {
+		t.Fatalf("first heartbeat: %+v", first)
+	}
+	if again := hbResp(); len(again.Actions) != 0 {
+		t.Fatalf("action delivered twice: %+v", again.Actions)
+	}
+	actionID := first.Actions[0].ID
+
+	result := protocol.ActionResult{ID: actionID, Outcome: protocol.OutcomeDone, Output: "clamd is reloading its signature databases",
+		StartedAt: time.Now().Add(-time.Second), FinishedAt: time.Now()}
+	if code, m := e.agentCall(protocol.PathActionResult, result, cred); code != 200 {
+		t.Fatalf("result: %d %v", code, m)
+	}
+	if code, _ := e.agentCall(protocol.PathActionResult, result, cred); code != 409 {
+		t.Fatalf("second result: got %d, want 409", code)
+	}
+	a, err := store.GetAction(ctx, e.pool, uuid.MustParse(actionID))
+	if err != nil || a.Status != store.ActionDone || a.Output != result.Output || a.FinishedAt == nil {
+		t.Fatalf("stored action %+v %v", a, err)
+	}
+	job, err := store.GetJob(ctx, e.pool, jobID)
+	if err != nil || job.Total != 1 || job.Done != 1 || !job.Finished() {
+		t.Fatalf("job %+v %v", job, err)
+	}
+
+	// Another agent cannot report on this agent's action, and nobody can
+	// report on an action that was never sent.
+	_, other := e.enrollSecond(tenantID)
+	jobID2, _, _ := store.CreateJob(ctx, e.pool, uuid.MustParse(tenantID), string(protocol.ActionClamdStats), json.RawMessage(`{}`), userID, []uuid.UUID{agentID})
+	acts, _ := store.ListJobActions(ctx, e.pool, jobID2)
+	queuedResult := protocol.ActionResult{ID: acts[0].ID.String(), Outcome: protocol.OutcomeDone, StartedAt: time.Now(), FinishedAt: time.Now()}
+	if code, _ := e.agentCall(protocol.PathActionResult, queuedResult, cred); code != 409 {
+		t.Fatalf("result for an undelivered action: got %d, want 409", code)
+	}
+	hbResp()
+	if code, _ := e.agentCall(protocol.PathActionResult, queuedResult, other); code != 409 {
+		t.Fatalf("result from another agent: got %d, want 409", code)
+	}
+
+	// Overdue actions expire.
+	if _, err := e.pool.Exec(ctx, `UPDATE agent_actions SET expires_at = now() - interval '1 second' WHERE job_id = $1`, jobID2); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := store.ExpireActions(ctx, e.pool); err != nil || n != 1 {
+		t.Fatalf("expire: %d %v", n, err)
+	}
+	if a, _ := store.GetAction(ctx, e.pool, acts[0].ID); a.Status != store.ActionExpired || a.Error == "" {
+		t.Fatalf("expired action %+v", a)
+	}
+}
+
+// enrollSecond enrolls another agent in the tenant with a fresh token.
+func (e *env) enrollSecond(tenantID string) (string, string) {
+	e.t.Helper()
+	_, body := e.form("/tenants/"+tenantID+"/tokens", url.Values{"label": {"t2"}, "expires_days": {"1"}})
+	tok := regexp.MustCompile(`cav_enr_[a-z0-9]+`).FindString(body)
+	code, resp := e.agentCall(protocol.PathEnroll, protocol.EnrollRequest{EnrollmentToken: tok, MachineID: "m2", Hostname: "host2",
+		OSFamily: "linux", OSName: "Debian 12", OSVersion: "6.1", Arch: "amd64", AgentVersion: "0.1.0"}, "")
+	if code != 201 {
+		e.t.Fatalf("enroll second: %d %v", code, resp)
+	}
+	return resp["agent_id"].(string), resp["credential"].(string)
+}
+
+func TestActionUI(t *testing.T) {
+	e := setup(t, "127.0.0.0/8")
+	e.login()
+	tenantID, cred := e.enrollAgent()
+	agentID := strings.SplitN(strings.TrimPrefix(cred, protocol.CredentialPrefix), ".", 2)[0]
+	ctx := context.Background()
+	count := func(q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := e.pool.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	if code, body := e.do("GET", "/agents/"+agentID, nil, nil); code != 200 || !strings.Contains(body, "Run on host1") || !strings.Contains(body, "Scan a folder") {
+		t.Fatalf("endpoint page: %d", code)
+	}
+
+	// Anything off the menu is refused, audited, and queues nothing.
+	for _, v := range []url.Values{
+		{"type": {"run_command"}, "path": {"rm -rf /"}},
+		{"type": {"scan_path"}, "path": {"../../etc"}},
+		{"type": {"scan_path"}, "path": {"/srv/\x00x"}},
+		{"type": {"scan_path"}, "path": {"relative/dir"}},
+	} {
+		if code, body := e.form("/agents/"+agentID+"/actions", v); code != 400 || !strings.Contains(body, "flash error") {
+			t.Fatalf("%v: %d", v, code)
+		}
+	}
+	if code, _ := e.form("/agents/"+agentID+"/actions", url.Values{"type": {"clamd_check"}, "csrf_token": {"wrong"}}); code != 403 {
+		t.Fatalf("bad CSRF: %d", code)
+	}
+	if n := count(`SELECT count(*) FROM agent_actions`); n != 0 {
+		t.Fatalf("%d actions queued by refused requests", n)
+	}
+	if n := count(`SELECT count(*) FROM audit_log WHERE action='agent_action.queue' AND outcome='denied' AND details->>'type'='run_command'`); n != 1 {
+		t.Fatalf("refused run_command audited %d times", n)
+	}
+
+	// One endpoint: queue a scan, deliver it, report a result.
+	code, body := e.form("/agents/"+agentID+"/actions", url.Values{"type": {"scan_path"}, "path": {" /srv/www "}})
+	if code != 200 || !strings.Contains(body, "<code>/srv/www</code>") || !strings.Contains(body, "waiting for the endpoint") || !strings.Contains(body, `hx-get="/jobs/`) {
+		t.Fatalf("job page: %d", code)
+	}
+	jobID := regexp.MustCompile(`/jobs/([0-9a-f-]{36})/export.csv`).FindStringSubmatch(body)[1]
+	if n := count(`SELECT count(*) FROM audit_log WHERE action='agent_action.queue' AND outcome='success' AND target_id=$1
+		AND details->'params'->>'path'='/srv/www' AND (details->>'endpoints')::int=1`, jobID); n != 1 {
+		t.Fatal("queue not audited")
+	}
+	_, hbOut := e.agentCall(protocol.PathHeartbeat, hb, cred)
+	acts, _ := hbOut["actions"].([]any)
+	if len(acts) != 1 {
+		t.Fatalf("heartbeat actions: %v", hbOut["actions"])
+	}
+	actionID := acts[0].(map[string]any)["id"].(string)
+	scan, _ := json.Marshal(protocol.ScanResult{Path: "/srv/www", InfectedTotal: 2, ErrorsTotal: 0, Infected: []protocol.ScanInfection{
+		{Path: "/srv/www/<script>alert(1)</script>.php", Signature: "Php.Malware-1"},
+		{Path: "/srv/www/b", Signature: `=HYPERLINK("http://evil.test","x")`},
+	}})
+	res := protocol.ActionResult{ID: actionID, Outcome: protocol.OutcomeDone, Output: "=cmd|' /C calc'!A0\nscanned", Data: scan,
+		StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now()}
+	if code, m := e.agentCall(protocol.PathActionResult, res, cred); code != 200 {
+		t.Fatalf("result: %d %v", code, m)
+	}
+
+	code, body = e.do("GET", "/jobs/"+jobID, nil, nil)
+	if code != 200 || !strings.Contains(body, "2 infected, 0 not scanned") || strings.Contains(body, `hx-get="/jobs/`) {
+		t.Fatalf("finished job page: %d (should show the result and stop refreshing)", code)
+	}
+	code, body = e.do("GET", "/actions/"+actionID, nil, nil)
+	if code != 200 || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;.php") || !strings.Contains(body, "Php.Malware-1") {
+		t.Fatalf("action page: %d", code)
+	}
+	if code, body := e.do("GET", "/agents/"+agentID, nil, nil); code != 200 || !strings.Contains(body, "/actions/"+actionID) || strings.Contains(body, `hx-get="/agents/`) {
+		t.Fatalf("endpoint history: %d", code)
+	}
+
+	// Exports. Cells a spreadsheet would run as formulas stay text.
+	readCSV := func(path string) [][]string {
+		t.Helper()
+		resp, err := e.client.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/csv") || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+			t.Fatalf("%s: %d %v", path, resp.StatusCode, resp.Header)
+		}
+		rows, err := csv.NewReader(resp.Body).ReadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	rows := readCSV("/jobs/" + jobID + "/export.csv")
+	if len(rows) != 2 || rows[1][3] != "host1" || rows[1][6] != "done" || rows[1][8] != "2" || rows[1][15] != "'=cmd|' /C calc'!A0\nscanned" {
+		t.Fatalf("job csv: %q", rows)
+	}
+	rows = readCSV("/jobs/" + jobID + "/infections.csv")
+	if len(rows) != 3 || rows[2][2] != "/srv/www/b" || rows[2][3] != `'=HYPERLINK("http://evil.test","x")` {
+		t.Fatalf("infections csv: %q", rows)
+	}
+	if rows := readCSV("/agents/" + agentID + "/actions/export.csv"); len(rows) != 2 || rows[1][1] != actionID {
+		t.Fatalf("endpoint csv: %q", rows)
+	}
+	code, body = e.do("GET", "/jobs/"+jobID+"/export.json", nil, nil)
+	var exp struct {
+		Actions []struct {
+			Status string          `json:"status"`
+			Output string          `json:"output"`
+			Data   json.RawMessage `json:"data"`
+		} `json:"actions"`
+	}
+	if code != 200 || json.Unmarshal([]byte(body), &exp) != nil || len(exp.Actions) != 1 || exp.Actions[0].Output != res.Output ||
+		!strings.Contains(string(exp.Actions[0].Data), "Php.Malware-1") {
+		t.Fatalf("json export: %d %s", code, body)
+	}
+
+	// Batch: run on ticked endpoints; only this tenant's agents count.
+	agent2, _ := e.enrollSecond(tenantID)
+	_, body = e.form("/tenants", url.Values{"name": {"Other"}})
+	otherTenant := regexp.MustCompile(`/tenants/([0-9a-f-]{36})/tokens`).FindStringSubmatch(body)[1]
+	if code, body := e.do("GET", "/tenants/"+tenantID+"/run", nil, nil); code != 200 || !strings.Contains(body, `value="`+agent2+`"`) {
+		t.Fatalf("run page: %d", code)
+	}
+	code, body = e.form("/tenants/"+otherTenant+"/jobs", url.Values{"type": {"clamd_check"}, "target": {"selected"}, "agent_id": {agentID}})
+	if code != 400 || !strings.Contains(body, "No endpoints to run it on") {
+		t.Fatalf("another tenant's endpoint: %d", code)
+	}
+	if code, _ := e.form("/tenants/"+tenantID+"/jobs", url.Values{"type": {"clamd_check"}, "target": {"selected"}, "agent_id": {"x' OR 1=1"}}); code != 400 {
+		t.Fatalf("bad selection: %d", code)
+	}
+	code, body = e.form("/tenants/"+tenantID+"/jobs", url.Values{"type": {"clamd_stats"}, "target": {"selected"}, "agent_id": {agentID, agent2}})
+	if code != 200 || !strings.Contains(body, "for 2 endpoints") || !strings.Contains(body, "Cancel waiting actions") {
+		t.Fatalf("batch job: %d", code)
+	}
+	batchID := regexp.MustCompile(`/jobs/([0-9a-f-]{36})/cancel`).FindStringSubmatch(body)[1]
+	if code, body := e.do("GET", "/jobs", nil, nil); code != 200 || !strings.Contains(body, "/jobs/"+batchID) || !strings.Contains(body, "clamd stats") {
+		t.Fatalf("jobs page: %d", code)
+	}
+
+	// Cancelling stops what has not been picked up, and is audited.
+	if code, body := e.form("/jobs/"+batchID+"/cancel", url.Values{}); code != 200 || !strings.Contains(body, "were cancelled") || !strings.Contains(body, "2 failed or not run") {
+		t.Fatalf("cancel: %d", code)
+	}
+	if n := count(`SELECT count(*) FROM agent_actions WHERE job_id=$1 AND status='cancelled'`, batchID); n != 2 {
+		t.Fatalf("%d cancelled", n)
+	}
+	if n := count(`SELECT count(*) FROM audit_log WHERE action='agent_action.cancel' AND target_id=$1 AND (details->>'cancelled')::int=2`, batchID); n != 1 {
+		t.Fatal("cancel not audited")
+	}
+	if _, hbOut := e.agentCall(protocol.PathHeartbeat, hb, cred); len(hbOut["actions"].([]any)) != 0 {
+		t.Fatalf("cancelled action delivered: %v", hbOut["actions"])
+	}
+
+	// A revoked endpoint takes no new actions.
+	e.form("/agents/"+agent2+"/revoke", url.Values{})
+	if code, body := e.form("/agents/"+agent2+"/actions", url.Values{"type": {"clamd_check"}}); code != 400 || !strings.Contains(body, "revoked") {
+		t.Fatalf("revoked endpoint: %d", code)
 	}
 }
